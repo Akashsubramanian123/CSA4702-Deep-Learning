@@ -1,0 +1,52 @@
+==========================================
+
+Python Bytecode & Cache
+
+==========================================
+
+Deep_learning_word_files/
+
+==========================================
+
+Dataset Generation Scripts Exclusions
+
+==========================================
+
+generate_dataset.py
+generate_datasets.py
+generate_dataset_co2.py
+generate_dataset*.py
+*/generate_dataset.py
+
+==========================================
+
+Python Bytecode & Cache
+
+==========================================
+
+pycache/
+*.py[cod]
+*$py.class
+*.so
+
+==========================================
+
+Virtual Environments
+
+==========================================
+
+.venv/
+venv/
+ENV/
+env/
+
+==========================================
+
+IDE & System Files
+
+==========================================
+
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

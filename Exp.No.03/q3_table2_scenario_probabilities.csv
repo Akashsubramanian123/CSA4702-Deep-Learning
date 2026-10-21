@@ -1,0 +1,5 @@
+Condition,Probability
+P(X = 0 defects),0.034275196060430335
+P(X = 3 defects),0.21928376068421435
+P(X <= 2 defects),0.344912059627134
+P(X >= 5 defects),0.25087487484496396

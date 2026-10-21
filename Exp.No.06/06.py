@@ -1,60 +1,123 @@
-import tensorflow as tf
+import os
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from tensorflow import keras
-from tensorflow.keras import layers
+import numpy as np
+import pandas as pd
 
-(x_train, y_train), (x_test, y_test) = (
-    keras.datasets.fashion_mnist.load_data()
-)
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-x_train = x_train.astype("float32") / 255.0
-x_test = x_test.astype("float32") / 255.0
 
-def build_model():
-    return keras.Sequential([
-        layers.Input(shape=(28, 28)),
-        layers.Flatten(),
-        layers.Dense(128, activation="relu"),
-        layers.Dense(10, activation="softmax")
-    ])
+def get_path(filename):
+    return os.path.join(BASE_DIR, filename)
 
-optimizers = {
-    "SGD": keras.optimizers.SGD(learning_rate=0.01),
-    "Momentum": keras.optimizers.SGD(
-        learning_rate=0.01, momentum=0.9
-    ),
-    "Adam": keras.optimizers.Adam(learning_rate=0.001)
-}
 
-histories = {}
+def load_optimization_data(filename="q6_optimization_dataset.csv"):
+    filepath = get_path(filename)
+    df = pd.read_csv(filepath)
+    X = df[["Feature_1", "Feature_2"]].values
+    y = df["Target"].values.reshape(-1, 1)
+    X_b = np.c_[np.ones((len(X), 1)), X]
+    return X_b, y
 
-for name, optimizer in optimizers.items():
-    tf.keras.utils.set_random_seed(7)
-    model = build_model()
-    model.compile(
-        optimizer=optimizer,
-        loss="sparse_categorical_crossentropy",
-        metrics=["accuracy"]
+
+def standard_gradient_descent(X, y, lr=0.08, epochs=120):
+    m = len(y)
+    weights = np.array([[5.0], [-6.0], [7.0]])
+    history = []
+
+    for _ in range(epochs):
+        preds = X.dot(weights)
+        loss = (1 / (2 * m)) * np.sum((preds - y) ** 2)
+        history.append(loss)
+        grads = (1 / m) * X.T.dot(preds - y)
+        weights -= lr * grads
+
+    return history, weights
+
+
+def momentum_gradient_descent(X, y, lr=0.08, beta=0.85, epochs=120):
+    m = len(y)
+    weights = np.array([[5.0], [-6.0], [7.0]])
+    velocity = np.zeros_like(weights)
+    history = []
+
+    for _ in range(epochs):
+        preds = X.dot(weights)
+        loss = (1 / (2 * m)) * np.sum((preds - y) ** 2)
+        history.append(loss)
+        grads = (1 / m) * X.T.dot(preds - y)
+        velocity = beta * velocity + lr * grads
+        weights -= velocity
+
+    return history, weights
+
+
+def generate_outputs(loss_sgd, loss_mom, w_sgd, w_mom):
+    iter_df = pd.DataFrame(
+        {
+            "Epoch": range(1, len(loss_sgd) + 1),
+            "Loss_Vanilla_GD": loss_sgd,
+            "Loss_Momentum_GD": loss_mom,
+        }
     )
+    iter_df.iloc[::10].to_csv(get_path("q6_table1_sampled_epoch_loss.csv"), index=False)
 
-    history = model.fit(
-        x_train, y_train,
-        epochs=5,
-        batch_size=128,
-        validation_split=0.1,
-        verbose=1
+    final_summary = pd.DataFrame(
+        {
+            "Optimizer": ["Standard Gradient Descent", "Momentum GD (beta=0.85)"],
+            "Initial_Loss": [loss_sgd[0], loss_mom[0]],
+            "Final_Loss": [loss_sgd[-1], loss_mom[-1]],
+            "Convergence_Epoch (Loss < 0.5)": [
+                next((i for i, v in enumerate(loss_sgd) if v < 0.5), "None"),
+                next((i for i, v in enumerate(loss_mom) if v < 0.5), "None"),
+            ],
+            "Final_Bias_Weight": [w_sgd[0, 0], w_mom[0, 0]],
+            "Final_W1": [w_sgd[1, 0], w_mom[1, 0]],
+            "Final_W2": [w_sgd[2, 0], w_mom[2, 0]],
+        }
     )
+    final_summary.to_csv(get_path("q6_table2_optimization_summary.csv"), index=False)
 
-    histories[name] = history.history
-    loss, accuracy = model.evaluate(x_test, y_test, verbose=0)
-    print(name, "Test loss:", round(loss, 4),
-          "Test accuracy:", round(accuracy, 4))
+    fig, ax = plt.subplots(figsize=(8, 4.5))
+    ax.plot(
+        loss_sgd,
+        label="Standard Gradient Descent",
+        color="crimson",
+        linestyle="--",
+    )
+    ax.plot(
+        loss_mom,
+        label="Momentum Gradient Descent (β=0.85)",
+        color="darkblue",
+        linewidth=2,
+    )
+    ax.set_yscale("log")
+    ax.set_xlabel("Epoch / Iteration")
+    ax.set_ylabel("Mean Squared Error (Log Scale)")
+    ax.set_title("Optimization Convergence: Vanilla GD vs Momentum")
+    ax.legend()
+    ax.grid(True, which="both", linestyle="--", alpha=0.5)
+    plt.tight_layout()
+    plt.savefig(get_path("q6_plot1_loss_curves.png"))
+    plt.close()
 
-for name, history in histories.items():
-    plt.plot(history["val_loss"], marker="o", label=name)
+    fig2, ax2 = plt.subplots(figsize=(6, 4))
+    ax2.bar(
+        ["Vanilla GD", "Momentum GD"],
+        [loss_sgd[-1], loss_mom[-1]],
+        color=["salmon", "lightseagreen"],
+    )
+    ax2.set_ylabel("Final Residual Loss")
+    ax2.set_title("Final Loss After Fixed Epochs")
+    plt.tight_layout()
+    plt.savefig(get_path("q6_plot2_final_loss_bar.png"))
+    plt.close()
 
-plt.xlabel("Epoch")
-plt.ylabel("Validation loss")
-plt.title("SGD vs Momentum vs Adam")
-plt.legend()
-plt.show()
+
+if __name__ == "__main__":
+    X_dat, y_dat = load_optimization_data("q6_optimization_dataset.csv")
+    l_sgd, w_s = standard_gradient_descent(X_dat, y_dat)
+    l_mom, w_m = momentum_gradient_descent(X_dat, y_dat)
+    generate_outputs(l_sgd, l_mom, w_s, w_m)
+    print("Q6 complete: 2 tables and 2 plots saved in Exp.No.06.")

@@ -1,0 +1,5 @@
+Operation,Mean_Intensity,Min_Value,Max_Value
+Original,127.75,41.0,219.0
+Brightness (+40),167.6875,81.0,255.0
+Contrast (*1.3),163.88906250000002,53.300000000000004,255.0
+Transposed,127.75,41.0,219.0
