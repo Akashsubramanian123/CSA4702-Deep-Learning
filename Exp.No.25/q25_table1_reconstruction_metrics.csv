@@ -1,0 +1,4 @@
+Metric,Value
+Mean Squared Reconstruction Error,0.104
+Binary Flag Match Accuracy,87.16%
+Latent Hidden Components,8

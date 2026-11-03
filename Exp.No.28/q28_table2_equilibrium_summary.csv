@@ -1,0 +1,3 @@
+Component,Final_Loss,Stability
+Discriminator,0.7259,Equilibrium
+Generator,1.1884,Active Gradient
