@@ -9,10 +9,19 @@ from tensorflow.keras.layers import Dense, Input, LeakyReLU
 from tensorflow.keras.models import Sequential
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+tf.keras.utils.set_random_seed(42)
 
 
 def get_path(filename):
     return os.path.join(BASE_DIR, filename)
+
+
+def to_scalar(val):
+    """Safely extract a scalar float from a number, list, array or tensor."""
+    arr = np.asarray(val)
+    if arr.ndim == 0:
+        return float(arr)
+    return float(arr.flatten()[0])
 
 
 def load_silhouettes(filename="q28_product_silhouettes_gan.csv"):
@@ -20,10 +29,12 @@ def load_silhouettes(filename="q28_product_silhouettes_gan.csv"):
     return df.values.astype(np.float32)
 
 
-def build_generator(latent_dim=10):
+def build_generator(latent_dim=16):
     model = Sequential([
         Input(shape=(latent_dim,)),
-        Dense(32),
+        Dense(64),
+        LeakyReLU(alpha=0.2),
+        Dense(128),
         LeakyReLU(alpha=0.2),
         Dense(64, activation="sigmoid"),
     ])
@@ -33,87 +44,125 @@ def build_generator(latent_dim=10):
 def build_discriminator(input_dim=64):
     model = Sequential([
         Input(shape=(input_dim,)),
-        Dense(32),
+        Dense(128),
+        LeakyReLU(alpha=0.2),
+        Dense(64),
         LeakyReLU(alpha=0.2),
         Dense(1, activation="sigmoid"),
     ])
-    model.compile(optimizer=tf.keras.optimizers.Adam(0.001), loss="binary_crossentropy", metrics=["accuracy"])
+    model.compile(optimizer=tf.keras.optimizers.Adam(0.0005, beta_1=0.5), loss="binary_crossentropy")
     return model
 
 
-def train_gan(X_real, epochs=60, batch_size=32, latent_dim=10):
+def train_gan(X_real, steps=3000, batch_size=32, latent_dim=16):
     gen = build_generator(latent_dim)
     disc = build_discriminator()
 
     disc.trainable = False
     gan_input = Input(shape=(latent_dim,))
-    fake_img = gen(gan_input)
-    gan_output = disc(fake_img)
+    gan_output = disc(gen(gan_input))
     gan = tf.keras.Model(gan_input, gan_output)
-    gan.compile(optimizer=tf.keras.optimizers.Adam(0.001), loss="binary_crossentropy")
+    gan.compile(optimizer=tf.keras.optimizers.Adam(0.0005, beta_1=0.5), loss="binary_crossentropy")
 
     d_losses, g_losses = [], []
     m = len(X_real)
 
-    for epoch in range(epochs):
-        # Sample real & fake
+    for step in range(steps):
+        # Sample real & fake batches
         idx = np.random.randint(0, m, batch_size)
         real_imgs = X_real[idx]
-        noise = np.random.normal(0, 1, (batch_size, latent_dim))
-        fake_imgs = gen.predict(noise, verbose=0)
+        noise = np.random.normal(0, 1, (batch_size, latent_dim)).astype(np.float32)
+        fake_imgs = gen.predict_on_batch(noise)
 
-        # Train Discriminator
+        # Train Discriminator (one-sided label smoothing: real label 0.9)
         res_real = disc.train_on_batch(real_imgs, np.ones((batch_size, 1)) * 0.9)
         res_fake = disc.train_on_batch(fake_imgs, np.zeros((batch_size, 1)))
-        
-        d_loss_real = float(np.squeeze(res_real[0] if isinstance(res_real, (list, np.ndarray)) else res_real))
-        d_loss_fake = float(np.squeeze(res_fake[0] if isinstance(res_fake, (list, np.ndarray)) else res_fake))
-        d_loss = 0.5 * (d_loss_real + d_loss_fake)
+        d_losses.append(0.5 * (to_scalar(res_real) + to_scalar(res_fake)))
 
-        # Train Generator
-        noise = np.random.normal(0, 1, (batch_size, latent_dim))
+        # Train Generator (through the frozen discriminator)
+        noise = np.random.normal(0, 1, (batch_size, latent_dim)).astype(np.float32)
         g_res = gan.train_on_batch(noise, np.ones((batch_size, 1)))
-        g_loss = float(np.squeeze(g_res))
-
-        d_losses.append(d_loss)
-        g_losses.append(g_loss)
+        g_losses.append(to_scalar(g_res))
 
     return gen, disc, d_losses, g_losses
 
-def generate_outputs(gen, disc, d_losses, g_losses, latent_dim=10):
-    # Ensure values are scalar floats
-    d_scalar = [float(np.squeeze(x)) for x in d_losses]
-    g_scalar = [float(np.squeeze(x)) for x in g_losses]
 
-    # Table 1: Training Progression
+def trend_label(series, window=500):
+    first, last = np.mean(series[:window]), np.mean(series[-window:])
+    if last < first * 0.95:
+        return "Decreasing"
+    if last > first * 1.05:
+        return "Increasing"
+    return "Stable"
+
+
+def generate_outputs(gen, disc, X_real, d_losses, g_losses, latent_dim=16):
+    d_arr, g_arr = np.array(d_losses), np.array(g_losses)
+    steps = len(d_arr)
+
+    # Table 1: Training Progression (every 100th step and the final step)
+    keep = sorted(set([0] + list(range(99, steps, 100)) + [steps - 1]))
     loss_df = pd.DataFrame(
         {
-            "Epoch": range(1, len(d_scalar) + 1),
-            "Discriminator_Loss": [round(x, 4) for x in d_scalar],
-            "Generator_Loss": [round(x, 4) for x in g_scalar],
+            "Epoch": [k + 1 for k in keep],
+            "Discriminator_Loss": d_arr[keep].round(4),
+            "Generator_Loss": g_arr[keep].round(4),
         }
     )
-    loss_df.iloc[::5].to_csv(get_path("q28_table1_adversarial_losses.csv"), index=False)
+    loss_df.to_csv(get_path("q28_table1_adversarial_losses.csv"), index=False)
 
     # Table 2: Final Model Status
+    mean_d_last = float(np.mean(d_arr[-500:]))
     summary_df = pd.DataFrame(
         {
             "Component": ["Discriminator", "Generator"],
-            "Final_Loss": [round(d_scalar[-1], 4), round(g_scalar[-1], 4)],
-            "Stability": [
-                "Equilibrium" if abs(d_scalar[-1] - 0.69) < 0.4 else "Converged",
-                "Active Gradient",
+            "Final_Loss": [round(float(d_arr[-1]), 4), round(float(g_arr[-1]), 4)],
+            "Mean_Loss_Last_500": [round(mean_d_last, 4), round(float(np.mean(g_arr[-500:])), 4)],
+            "Trend": [trend_label(d_arr), trend_label(g_arr)],
+            "Status": [
+                "Near equilibrium" if abs(mean_d_last - 0.693) < 0.15 else "Not at equilibrium",
+                "Active gradient",
             ],
         }
     )
     summary_df.to_csv(get_path("q28_table2_equilibrium_summary.csv"), index=False)
 
-    # Plot 1: Adversarial Loss Curves
+    # Table 3: Real vs generated image statistics
+    rng = np.random.default_rng(42)
+    noise = rng.normal(size=(len(X_real), latent_dim)).astype(np.float32)
+    fake = gen.predict_on_batch(noise)
+    d_real = float(np.mean(disc.predict_on_batch(X_real)))
+    d_fake = float(np.mean(disc.predict_on_batch(fake)))
+    stats_df = pd.DataFrame(
+        {
+            "Metric": [
+                "Mean pixel value",
+                "Pixel standard deviation",
+                "Mean discriminator output",
+                "Mean absolute difference of mean images",
+            ],
+            "Real": [round(float(X_real.mean()), 4), round(float(X_real.std()), 4), round(d_real, 4), 0.0],
+            "Generated": [
+                round(float(fake.mean()), 4),
+                round(float(fake.std()), 4),
+                round(d_fake, 4),
+                round(float(np.mean(np.abs(X_real.mean(axis=0) - fake.mean(axis=0)))), 4),
+            ],
+        }
+    )
+    stats_df.to_csv(get_path("q28_table3_real_vs_generated.csv"), index=False)
+
+    # Plot 1: Adversarial Loss Curves (raw + moving average)
+    def smooth(a, w=50):
+        return np.convolve(a, np.ones(w) / w, mode="valid")
+
     fig, ax = plt.subplots(figsize=(8, 4.5))
-    ax.plot(d_scalar, label="Discriminator Loss", color="crimson", linewidth=1.8)
-    ax.plot(g_scalar, label="Generator Loss", color="teal", linewidth=1.8)
+    ax.plot(d_arr, color="crimson", alpha=0.2)
+    ax.plot(g_arr, color="teal", alpha=0.2)
+    ax.plot(np.arange(49, steps), smooth(d_arr), label="Discriminator Loss", color="crimson", linewidth=2)
+    ax.plot(np.arange(49, steps), smooth(g_arr), label="Generator Loss", color="teal", linewidth=2)
     ax.axhline(0.693, color="gray", linestyle="--", label="Theoretical Equilibrium (-ln 0.5)")
-    ax.set_xlabel("Epochs")
+    ax.set_xlabel("Training Steps")
     ax.set_ylabel("Binary Cross-Entropy Loss")
     ax.set_title("GAN Adversarial Optimization Dynamics")
     ax.legend()
@@ -122,8 +171,24 @@ def generate_outputs(gen, disc, d_losses, g_losses, latent_dim=10):
     plt.savefig(get_path("q28_plot1_loss_dynamics.png"))
     plt.close()
 
+    # Plot 2: Real vs generated silhouette patches
+    fig2, axes = plt.subplots(4, 8, figsize=(10, 5.4))
+    real_idx = rng.choice(len(X_real), 16, replace=False)
+    for i in range(16):
+        r, c = divmod(i, 4)
+        axes[r, c].imshow(X_real[real_idx[i]].reshape(8, 8), cmap="gray", vmin=0, vmax=1)
+        axes[r, c + 4].imshow(fake[i].reshape(8, 8), cmap="gray", vmin=0, vmax=1)
+    for ax in axes.flat:
+        ax.axis("off")
+    axes[0, 0].set_title("Real patches", loc="left", fontsize=10)
+    axes[0, 4].set_title("GAN generated patches", loc="left", fontsize=10)
+    plt.tight_layout()
+    plt.savefig(get_path("q28_plot2_generated_images.png"))
+    plt.close()
+
+
 if __name__ == "__main__":
     X_data = load_silhouettes()
-    g_net, d_net, d_hist, g_hist = train_gan(X_data, epochs=50)
-    generate_outputs(g_net, d_net, d_hist, g_hist)
-    print("Lab 28 complete: 2 tables and 2 plots saved in Exp.No.28.")
+    g_net, d_net, d_hist, g_hist = train_gan(X_data, steps=3000)
+    generate_outputs(g_net, d_net, X_data, d_hist, g_hist)
+    print("Lab 28 complete: 3 tables and 2 plots saved in Exp.No.28.")

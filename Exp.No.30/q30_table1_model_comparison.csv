@@ -1,4 +1,4 @@
-Model,Reconstruction_MSE,Sample_Diversity (Pairwise Dist),Wasserstein_Distribution_Dist,Primary_Strength
-Real Ground Truth,0.0,1.207,0.0,N/A
-Variational Autoencoder (VAE),0.068,1.172,0.0593,Stable Likelihood & Smooth Latent Space
-Generative Adversarial Net (GAN),1.2237,1.419,0.049,Sharp Sample Synthesis
+Model,Reconstruction_MSE (paired),Nearest_Neighbour_MSE,Sample_Diversity,Frechet_Distance
+Real Ground Truth,0.0,0.0,1.213,0.0
+Variational Autoencoder (VAE),0.068,0.0158,1.177,0.0593
+Generative Adversarial Net (GAN),1.2237,0.0199,1.426,0.0497
