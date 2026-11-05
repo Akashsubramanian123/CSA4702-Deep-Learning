@@ -16,14 +16,6 @@ def get_path(filename):
     return os.path.join(BASE_DIR, filename)
 
 
-def to_scalar(val):
-    """Safely extract a scalar float from a number, list, array or tensor."""
-    arr = np.asarray(val)
-    if arr.ndim == 0:
-        return float(arr)
-    return float(arr.flatten()[0])
-
-
 def load_silhouettes(filename="q28_product_silhouettes_gan.csv"):
     df = pd.read_csv(get_path(filename))
     return df.values.astype(np.float32)
@@ -33,9 +25,9 @@ def build_generator(latent_dim=16):
     model = Sequential([
         Input(shape=(latent_dim,)),
         Dense(64),
-        LeakyReLU(alpha=0.2),
+        LeakyReLU(negative_slope=0.2),
         Dense(128),
-        LeakyReLU(alpha=0.2),
+        LeakyReLU(negative_slope=0.2),
         Dense(64, activation="sigmoid"),
     ])
     return model
@@ -45,45 +37,58 @@ def build_discriminator(input_dim=64):
     model = Sequential([
         Input(shape=(input_dim,)),
         Dense(128),
-        LeakyReLU(alpha=0.2),
+        LeakyReLU(negative_slope=0.2),
         Dense(64),
-        LeakyReLU(alpha=0.2),
+        LeakyReLU(negative_slope=0.2),
         Dense(1, activation="sigmoid"),
     ])
-    model.compile(optimizer=tf.keras.optimizers.Adam(0.0005, beta_1=0.5), loss="binary_crossentropy")
     return model
 
 
 def train_gan(X_real, steps=3000, batch_size=32, latent_dim=16):
+    """Adversarial training with an explicit GradientTape loop. The discriminator update
+    changes only the discriminator weights and the generator update changes only the
+    generator weights, so no trainable-flag switching is needed."""
     gen = build_generator(latent_dim)
     disc = build_discriminator()
-
-    disc.trainable = False
-    gan_input = Input(shape=(latent_dim,))
-    gan_output = disc(gen(gan_input))
-    gan = tf.keras.Model(gan_input, gan_output)
-    gan.compile(optimizer=tf.keras.optimizers.Adam(0.0005, beta_1=0.5), loss="binary_crossentropy")
-
-    d_losses, g_losses = [], []
+    bce = tf.keras.losses.BinaryCrossentropy()
+    g_opt = tf.keras.optimizers.Adam(0.0002, beta_1=0.5)
+    d_opt = tf.keras.optimizers.Adam(0.0002, beta_1=0.5)
+    real_data = tf.constant(X_real, dtype=tf.float32)
     m = len(X_real)
 
-    for step in range(steps):
-        # Sample real & fake batches
-        idx = np.random.randint(0, m, batch_size)
-        real_imgs = X_real[idx]
-        noise = np.random.normal(0, 1, (batch_size, latent_dim)).astype(np.float32)
-        fake_imgs = gen.predict_on_batch(noise)
+    @tf.function
+    def train_step():
+        idx = tf.random.uniform((batch_size,), 0, m, dtype=tf.int32)
+        real_imgs = tf.gather(real_data, idx)
 
-        # Train Discriminator (one-sided label smoothing: real label 0.9)
-        res_real = disc.train_on_batch(real_imgs, np.ones((batch_size, 1)) * 0.9)
-        res_fake = disc.train_on_batch(fake_imgs, np.zeros((batch_size, 1)))
-        d_losses.append(0.5 * (to_scalar(res_real) + to_scalar(res_fake)))
+        # Discriminator step (one-sided label smoothing: real label 0.9)
+        noise = tf.random.normal((batch_size, latent_dim))
+        with tf.GradientTape() as d_tape:
+            fake_imgs = gen(noise, training=True)
+            d_real = disc(real_imgs, training=True)
+            d_fake = disc(fake_imgs, training=True)
+            d_loss = 0.5 * (
+                bce(tf.ones_like(d_real) * 0.9, d_real) + bce(tf.zeros_like(d_fake), d_fake)
+            )
+        d_grads = d_tape.gradient(d_loss, disc.trainable_variables)
+        d_opt.apply_gradients(zip(d_grads, disc.trainable_variables))
 
-        # Train Generator (through the frozen discriminator)
-        noise = np.random.normal(0, 1, (batch_size, latent_dim)).astype(np.float32)
-        g_res = gan.train_on_batch(noise, np.ones((batch_size, 1)))
-        g_losses.append(to_scalar(g_res))
+        # Generator step (non-saturating loss: generator wants D(fake) -> 1)
+        noise = tf.random.normal((batch_size, latent_dim))
+        with tf.GradientTape() as g_tape:
+            fake_imgs = gen(noise, training=True)
+            g_out = disc(fake_imgs, training=False)
+            g_loss = bce(tf.ones_like(g_out), g_out)
+        g_grads = g_tape.gradient(g_loss, gen.trainable_variables)
+        g_opt.apply_gradients(zip(g_grads, gen.trainable_variables))
+        return d_loss, g_loss
 
+    d_losses, g_losses = [], []
+    for _ in range(steps):
+        d_l, g_l = train_step()
+        d_losses.append(float(d_l))
+        g_losses.append(float(g_l))
     return gen, disc, d_losses, g_losses
 
 
@@ -130,9 +135,9 @@ def generate_outputs(gen, disc, X_real, d_losses, g_losses, latent_dim=16):
     # Table 3: Real vs generated image statistics
     rng = np.random.default_rng(42)
     noise = rng.normal(size=(len(X_real), latent_dim)).astype(np.float32)
-    fake = gen.predict_on_batch(noise)
-    d_real = float(np.mean(disc.predict_on_batch(X_real)))
-    d_fake = float(np.mean(disc.predict_on_batch(fake)))
+    fake = gen(noise, training=False).numpy()
+    d_real = float(np.mean(disc(X_real, training=False).numpy()))
+    d_fake = float(np.mean(disc(fake, training=False).numpy()))
     stats_df = pd.DataFrame(
         {
             "Metric": [

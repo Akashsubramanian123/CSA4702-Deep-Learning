@@ -18,14 +18,6 @@ def get_path(filename):
     return os.path.join(BASE_DIR, filename)
 
 
-def to_scalar(val):
-    """Safely extracts a scalar float from any 0D/1D numpy array, list, or tensor."""
-    arr = np.asarray(val)
-    if arr.ndim == 0:
-        return float(arr)
-    return float(arr.flatten()[0])
-
-
 def load_hazard_signs(filename="q29_hazard_signs_cgan.csv"):
     df = pd.read_csv(get_path(filename))
     X = df[[f"p_{i}" for i in range(64)]].values.astype(np.float32)
@@ -39,8 +31,8 @@ def build_cgan_models(latent_dim=16, num_classes=3):
     label_in = Input(shape=(1,), dtype="int32")
     label_emb = Reshape((latent_dim,))(Embedding(num_classes, latent_dim)(label_in))
     gen_in = Concatenate()([noise_in, label_emb])
-    h_g = LeakyReLU(alpha=0.2)(Dense(64)(gen_in))
-    h_g = LeakyReLU(alpha=0.2)(Dense(128)(h_g))
+    h_g = LeakyReLU(negative_slope=0.2)(Dense(64)(gen_in))
+    h_g = LeakyReLU(negative_slope=0.2)(Dense(128)(h_g))
     out_g = Dense(64, activation="sigmoid")(h_g)
     generator = Model([noise_in, label_in], out_g, name="cgen")
 
@@ -49,51 +41,60 @@ def build_cgan_models(latent_dim=16, num_classes=3):
     disc_label_in = Input(shape=(1,), dtype="int32")
     disc_label_emb = Reshape((64,))(Embedding(num_classes, 64)(disc_label_in))
     disc_in = Concatenate()([img_in, disc_label_emb])
-    h_d = LeakyReLU(alpha=0.2)(Dense(128)(disc_in))
-    h_d = LeakyReLU(alpha=0.2)(Dense(64)(h_d))
+    h_d = LeakyReLU(negative_slope=0.2)(Dense(128)(disc_in))
+    h_d = LeakyReLU(negative_slope=0.2)(Dense(64)(h_d))
     out_d = Dense(1, activation="sigmoid")(h_d)
     discriminator = Model([img_in, disc_label_in], out_d, name="cdisc")
-    discriminator.compile(
-        optimizer=tf.keras.optimizers.Adam(0.0005, beta_1=0.5),
-        loss="binary_crossentropy"
-    )
-
-    # Combined Conditional Model (trains generator)
-    discriminator.trainable = False
-    validity = discriminator([out_g, label_in])
-    cgan = Model([noise_in, label_in], validity)
-    cgan.compile(
-        optimizer=tf.keras.optimizers.Adam(0.0005, beta_1=0.5),
-        loss="binary_crossentropy"
-    )
-
-    return generator, discriminator, cgan
+    return generator, discriminator
 
 
 def train_cgan(X_real, y_real, steps=5000, batch_size=32, latent_dim=16):
+    """Conditional GAN trained with an explicit GradientTape loop. The discriminator update
+    changes only the discriminator weights and the generator update changes only the
+    generator weights, so no trainable-flag switching is needed."""
     num_classes = int(y_real.max()) + 1
-    gen, disc, cgan = build_cgan_models(latent_dim, num_classes)
+    gen, disc = build_cgan_models(latent_dim, num_classes)
+    bce = tf.keras.losses.BinaryCrossentropy()
+    g_opt = tf.keras.optimizers.Adam(0.0002, beta_1=0.5)
+    d_opt = tf.keras.optimizers.Adam(0.0002, beta_1=0.5)
+    real_data = tf.constant(X_real, dtype=tf.float32)
+    real_labels = tf.constant(y_real.reshape(-1, 1), dtype=tf.int32)
     m = len(X_real)
+
+    @tf.function
+    def train_step():
+        idx = tf.random.uniform((batch_size,), 0, m, dtype=tf.int32)
+        real_imgs = tf.gather(real_data, idx)
+        labels = tf.gather(real_labels, idx)
+
+        # Discriminator step (real label smoothed to 0.9, fakes use the same class labels)
+        noise = tf.random.normal((batch_size, latent_dim))
+        with tf.GradientTape() as d_tape:
+            fake_imgs = gen([noise, labels], training=True)
+            d_real = disc([real_imgs, labels], training=True)
+            d_fake = disc([fake_imgs, labels], training=True)
+            d_loss = 0.5 * (
+                bce(tf.ones_like(d_real) * 0.9, d_real) + bce(tf.zeros_like(d_fake), d_fake)
+            )
+        d_grads = d_tape.gradient(d_loss, disc.trainable_variables)
+        d_opt.apply_gradients(zip(d_grads, disc.trainable_variables))
+
+        # Generator step with random class labels and fresh noise
+        noise = tf.random.normal((batch_size, latent_dim))
+        sampled = tf.random.uniform((batch_size, 1), 0, num_classes, dtype=tf.int32)
+        with tf.GradientTape() as g_tape:
+            fake_imgs = gen([noise, sampled], training=True)
+            g_out = disc([fake_imgs, sampled], training=False)
+            g_loss = bce(tf.ones_like(g_out), g_out)
+        g_grads = g_tape.gradient(g_loss, gen.trainable_variables)
+        g_opt.apply_gradients(zip(g_grads, gen.trainable_variables))
+        return d_loss, g_loss
+
     d_losses, g_losses = [], []
-
     for _ in range(steps):
-        # Sample real images and their labels
-        idx = np.random.randint(0, m, batch_size)
-        real_imgs, labels = X_real[idx], y_real[idx].reshape(-1, 1)
-        noise = np.random.normal(0, 1, (batch_size, latent_dim)).astype(np.float32)
-        fake_imgs = gen.predict_on_batch([noise, labels])
-
-        # Train Discriminator (real label smoothed to 0.9)
-        res_real = disc.train_on_batch([real_imgs, labels], np.ones((batch_size, 1)) * 0.9)
-        res_fake = disc.train_on_batch([fake_imgs, labels], np.zeros((batch_size, 1)))
-        d_losses.append(0.5 * (to_scalar(res_real) + to_scalar(res_fake)))
-
-        # Train Generator with random class labels and fresh noise
-        noise = np.random.normal(0, 1, (batch_size, latent_dim)).astype(np.float32)
-        sampled_labels = np.random.randint(0, num_classes, (batch_size, 1)).astype(np.int32)
-        g_res = cgan.train_on_batch([noise, sampled_labels], np.ones((batch_size, 1)))
-        g_losses.append(to_scalar(g_res))
-
+        d_l, g_l = train_step()
+        d_losses.append(float(d_l))
+        g_losses.append(float(g_l))
     return gen, d_losses, g_losses, num_classes
 
 
@@ -120,7 +121,7 @@ def generate_outputs(gen, X_real, y_real, d_losses, g_losses, num_classes, laten
     for c in range(num_classes):
         noise = rng.normal(size=(200, latent_dim)).astype(np.float32)
         labels = np.full((200, 1), c, dtype=np.int32)
-        gen_samples[c] = gen.predict_on_batch([noise, labels])
+        gen_samples[c] = gen([noise, labels], training=False).numpy()
 
     rows = []
     for c in range(num_classes):
